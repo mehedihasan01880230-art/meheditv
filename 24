@@ -1,0 +1,256 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import Player from "./components/Player";
+import ChannelCard from "./components/ChannelCard";
+import { CATEGORIES, parseM3U, type Channel } from "./lib/m3u";
+import { PLAYLIST_URL, SITE_SUBTITLE, SITE_TITLE } from "./config";
+import fallbackPlaylist from "./data/playlist.m3u?raw";
+
+type Tab = "all" | "fav" | (typeof CATEGORIES)[number]["id"];
+
+const loadJSON = <T,>(key: string, def: T): T => {
+  try {
+    const v = localStorage.getItem(key);
+    return v ? (JSON.parse(v) as T) : def;
+  } catch {
+    return def;
+  }
+};
+
+export default function App() {
+  const [channels, setChannels] = useState<Channel[]>(() => parseM3U(fallbackPlaylist));
+  const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState<Tab>("all");
+  const [query, setQuery] = useState("");
+  const [currentName, setCurrentName] = useState<string | null>(() => loadJSON<string | null>("nsx:last", null));
+  const [favs, setFavs] = useState<string[]>(() => loadJSON<string[]>("nsx:favs", []));
+
+  // সর্বশেষ প্লেলিস্ট GitHub থেকে আনা (ব্যর্থ হলে ভেতরের কপি ব্যবহার হবে)
+  useEffect(() => {
+    const ctrl = new AbortController();
+    fetch(`${PLAYLIST_URL}?t=${Date.now()}`, { signal: ctrl.signal, cache: "no-store" })
+      .then((r) => (r.ok ? r.text() : Promise.reject(new Error("bad status"))))
+      .then((t) => {
+        const list = parseM3U(t);
+        if (list.length > 0) setChannels(list);
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+    return () => ctrl.abort();
+  }, []);
+
+  useEffect(() => localStorage.setItem("nsx:favs", JSON.stringify(favs)), [favs]);
+
+  // চ্যানেলের পরিচয় = নাম + লিংক (প্লেলিস্টে পজিশন বদলালেও প্রিয় তালিকা ঠিক থাকবে)
+  const keyOf = (c: Channel) => `${c.name}|${c.url}`;
+
+  const current = useMemo(
+    () => channels.find((c) => keyOf(c) === currentName) ?? channels[0] ?? null,
+    [channels, currentName],
+  );
+
+  const select = useCallback((c: Channel) => {
+    setCurrentName(`${c.name}|${c.url}`);
+    localStorage.setItem("nsx:last", JSON.stringify(`${c.name}|${c.url}`));
+    if (window.matchMedia("(max-width: 1023px)").matches) window.scrollTo({ top: 0, behavior: "smooth" });
+  }, []);
+
+  const toggleFav = (c: Channel) => {
+    const k = keyOf(c);
+    setFavs((f) => (f.includes(k) ? f.filter((x) => x !== k) : [...f, k]));
+  };
+
+  const counts = useMemo(() => {
+    const m: Record<string, number> = { all: channels.length, fav: 0 };
+    for (const c of channels) {
+      m[c.category] = (m[c.category] ?? 0) + 1;
+      if (favs.includes(keyOf(c))) m.fav++;
+    }
+    return m;
+  }, [channels, favs]);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return channels.filter((c) => {
+      if (tab === "fav" && !favs.includes(keyOf(c))) return false;
+      if (tab !== "all" && tab !== "fav" && c.category !== tab) return false;
+      if (q && !c.name.toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [channels, tab, query, favs]);
+
+  const step = useCallback(
+    (dir: 1 | -1) => {
+      const list = filtered.length ? filtered : channels;
+      if (!list.length || !current) return;
+      const i = list.findIndex((c) => keyOf(c) === keyOf(current));
+      const next = list[(i + dir + list.length) % list.length];
+      setCurrentName(keyOf(next));
+      localStorage.setItem("nsx:last", JSON.stringify(keyOf(next)));
+    },
+    [filtered, channels, current],
+  );
+
+  const isFav = current ? favs.includes(keyOf(current)) : false;
+  const catLabel = current ? CATEGORIES.find((c) => c.id === current.category) : null;
+
+  const tabs: { id: Tab; label: string; emoji: string }[] = [
+    { id: "all", label: "সব চ্যানেল", emoji: "📡" },
+    { id: "fav", label: "প্রিয়", emoji: "❤️" },
+    ...CATEGORIES.filter((c) => counts[c.id]).map((c) => ({ id: c.id as Tab, label: c.label, emoji: c.emoji })),
+  ];
+
+  return (
+    <div className="min-h-screen text-slate-100">
+      {/* ===== হেডার ===== */}
+      <header className="mx-auto max-w-7xl px-4 pb-3 pt-5 text-center sm:pt-8 lg:text-left">
+        <div className="flex flex-col items-center gap-1 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <h1 className="bg-gradient-to-r from-white via-indigo-200 to-rose-300 bg-clip-text text-[1.7rem] font-black leading-tight tracking-wide text-transparent sm:text-4xl lg:text-5xl">
+              {SITE_TITLE}
+            </h1>
+            <p className="mx-auto mt-1.5 max-w-xl text-[13px] text-slate-400 sm:text-base lg:mx-0">{SITE_SUBTITLE}</p>
+          </div>
+          <div className="mt-2 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-300 lg:mt-0">
+            <span className="live-dot h-2 w-2 rounded-full bg-emerald-400" />
+            {loading ? "চ্যানেল লোড হচ্ছে..." : `${channels.length}টি চ্যানেল লাইভ`}
+          </div>
+        </div>
+      </header>
+
+      <main className="mx-auto grid max-w-7xl gap-4 px-0 pb-10 sm:px-4 lg:grid-cols-[minmax(0,1fr)_400px] lg:gap-6">
+        {/* ===== প্লেয়ার (মোবাইলে উপরে আটকে থাকবে) ===== */}
+        <section className="sticky top-0 z-30 bg-[#070b1a]/95 pb-2 backdrop-blur sm:static sm:bg-transparent sm:pb-0 lg:sticky lg:top-4 lg:self-start">
+          <Player channel={current} onNext={() => step(1)} />
+
+          <div className="mt-3 flex items-center gap-3 px-4 sm:px-0">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <span className="inline-flex items-center gap-1 rounded bg-rose-600 px-1.5 py-0.5 text-[10px] font-bold tracking-wider text-white">
+                  <span className="live-dot h-1.5 w-1.5 rounded-full bg-white" /> LIVE
+                </span>
+                {catLabel && (
+                  <span className="truncate text-xs text-slate-400">
+                    {catLabel.emoji} {catLabel.label}
+                  </span>
+                )}
+              </div>
+              <h2 className="truncate text-lg font-bold sm:text-xl">{current?.name ?? "—"}</h2>
+            </div>
+
+            <div className="flex shrink-0 items-center gap-1.5">
+              <IconBtn label="আগের চ্যানেল" onClick={() => step(-1)}>
+                ⏮
+              </IconBtn>
+              <IconBtn label="পরের চ্যানেল" onClick={() => step(1)}>
+                ⏭
+              </IconBtn>
+              <button
+                onClick={() => current && toggleFav(current)}
+                className={`flex h-10 items-center gap-1.5 rounded-full px-3.5 text-sm font-semibold transition active:scale-95 ${
+                  isFav ? "bg-rose-600 text-white" : "bg-white/10 text-white hover:bg-white/20"
+                }`}
+              >
+                {isFav ? "♥" : "♡"} <span className="hidden sm:inline">{isFav ? "প্রিয়" : "প্রিয় করুন"}</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-4 hidden rounded-2xl border border-white/10 bg-white/[0.04] p-4 text-sm text-slate-300 lg:block">
+            <p className="font-semibold text-white">💡 টিপস</p>
+            <ul className="mt-1.5 list-inside list-disc space-y-1 text-slate-400">
+              <li>চ্যানেল না চললে “আবার চেষ্টা করুন” চাপুন অথবা পাশের অন্য চ্যানেলে যান।</li>
+              <li>❤️ চাপলে চ্যানেলটি “প্রিয়” তালিকায় সেভ থাকবে।</li>
+              <li>ভিডিওর ডান নিচের বাটন থেকে ফুল স্ক্রিন করতে পারবেন।</li>
+            </ul>
+          </div>
+        </section>
+
+        {/* ===== চ্যানেল লিস্ট ===== */}
+        <aside className="flex min-h-0 flex-col px-3 sm:px-0 lg:max-h-[calc(100vh-2rem)] lg:sticky lg:top-4 lg:self-start">
+          <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-3 backdrop-blur lg:flex lg:min-h-0 lg:flex-1 lg:flex-col">
+            <div className="relative">
+              <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500">🔍</span>
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="চ্যানেল খুঁজুন..."
+                className="w-full rounded-xl border border-white/10 bg-white/5 py-2.5 pl-10 pr-10 text-[15px] text-white outline-none placeholder:text-slate-500 focus:border-indigo-400/60"
+              />
+              {query && (
+                <button
+                  onClick={() => setQuery("")}
+                  aria-label="মুছুন"
+                  className="absolute right-2 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-slate-400 hover:bg-white/10"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            <div className="no-scrollbar -mx-1 mt-3 flex gap-2 overflow-x-auto px-1 pb-1">
+              {tabs.map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => setTab(t.id)}
+                  className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-3.5 py-1.5 text-[13px] font-semibold transition active:scale-95 ${
+                    tab === t.id
+                      ? "bg-gradient-to-r from-indigo-500 to-rose-500 text-white shadow"
+                      : "bg-white/10 text-slate-300 hover:bg-white/15"
+                  }`}
+                >
+                  <span>{t.emoji}</span>
+                  {t.label}
+                  <span className={`text-[11px] ${tab === t.id ? "text-white/80" : "text-slate-500"}`}>{counts[t.id] ?? 0}</span>
+                </button>
+              ))}
+            </div>
+
+            <div className="nice-scroll mt-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:pr-1">
+              {filtered.length === 0 ? (
+                <div className="py-10 text-center text-slate-400">
+                  <div className="text-4xl">{tab === "fav" ? "💔" : "🔎"}</div>
+                  <p className="mt-2 text-sm">
+                    {tab === "fav" ? "এখনো কোনো প্রিয় চ্যানেল নেই। চ্যানেলের ♡ চাপুন।" : "কোনো চ্যানেল পাওয়া যায়নি।"}
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-3 gap-2.5 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-2">
+                  {filtered.map((c) => (
+                    <ChannelCard
+                      key={c.id}
+                      channel={c}
+                      active={!!current && keyOf(c) === keyOf(current)}
+                      favorite={favs.includes(keyOf(c))}
+                      onSelect={() => select(c)}
+                      onToggleFav={() => toggleFav(c)}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </aside>
+      </main>
+
+      {/* ===== ফুটার ===== */}
+      <footer className="border-t border-white/5 px-4 py-6 text-center text-xs text-slate-500">
+        <p className="font-semibold text-slate-300">{SITE_TITLE}</p>
+        <p className="mt-1">Powered by Netscope Broadband Internet · সর্বোত্তম অভিজ্ঞতার জন্য দ্রুতগতির ইন্টারনেট ব্যবহার করুন</p>
+        <p className="mt-1">চ্যানেলগুলোর কনটেন্ট সংশ্লিষ্ট চ্যানেল কর্তৃপক্ষের মালিকানাধীন।</p>
+      </footer>
+    </div>
+  );
+}
+
+function IconBtn({ children, label, onClick }: { children: React.ReactNode; label: string; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-base text-white transition hover:bg-white/20 active:scale-90"
+    >
+      {children}
+    </button>
+  );
+}
